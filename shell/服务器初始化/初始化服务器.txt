@@ -1,0 +1,341 @@
+初始化服务器
+
+1、公司apt源，初始化单位4台服务器的源，居然用了一天，到最后居然是源的问题
+	再次确定不能自动解决依赖关系就是源的问题，公司的两个源需要配合使用
+	ppweb.list   
+		deb http://mirrors.lieyan.com.cn/ppweb-ubuntu/ lucid main non-free contrib
+	sources.list
+		deb http://mirrors.ustc.edu.cn/ubuntu lucid main universe multiverse restricted
+		deb http://mirrors.ustc.edu.cn/ubuntu lucid-updates main universe multiverse restricted
+
+
+2、卸载一个已安装的软件包（删除配置文件） 
+	apt-get --purge remove packagename
+	dpkg -P packagename
+
+
+
+修改hostname
+更改apt源
+sudo apt-get update
+sudo apt-get upgrade
+装不上的公共包先不装，等到最后再用其它源装。
+
+
+1、初始化服务器应用
+ubuntu
+
+sudo apt-get install -y --force-yes --no-install-recommends ppweb-archive-keyring ppweb-bashrc ppweb-sysctl ppweb-policy-server ntp fail2ban ganglia-monitor-config-game sysstat lrzsz mongodb fps-glassfish-app-stateserver fps-glassfish-domain-stateserver libpocofoundation9 libpocoxml9 libpocoutil9 libpoconet9 libssl0.9.8
+
+sudo apt-get install python-setuptools bzip2 salt-minion（用其它源装的，装完后，要卸载掉open-jdk，只保留oracle-jdk）
+sudo easy_install pymongo==2.4.2（用于new_report_html.py及7k7k_Data）
+sudo easy_install simplejson
+
+sudo easy_install ordereddict
+sudo apt-get install oracle-jdk7
+
+2、安装salt-minion（首先要更新一下源）
+
+sudo apt-get install salt-minion
+vim /etc/salt/minion
+	master: fps21.gd.ppweb.com.cn
+	id: fps0.uc
+sudo /etc/init.d/salt-minion restart
+	重启后，在salt服务端就会被认证，每重启一次，就会被认证一次
+	
+
+3、master管理
+
+sudo salt-key -L
+	Unaccepted Keys:
+	fps0.uc
+	fps1.uc
+	fps2.uc
+	fps3.uc
+
+	sudo salt-key -d fps0.uc  可删除认证
+sudo salt-key -A fps0.sy
+sudo salt-key -A 是增加所有
+vim /srv/pillar/platform_serverid/4399_1.sls  => /srv/pillar/top.sls
+
+4、minion 初始化mongo/bin
+
+salt '123' state.sls base_file.[bin_upload|mongo_upload]
+
+5、关于mongo
+
+sudo mkdir -pv /backup/mongodata/backup/{differential,full}
+sudo chown op:op -R /backup/mongodata
+
+sudo mkdir -pv /data/mongodata/{log{,1,2,3},data{,1,2,3}/{shard{1,2},config}}
+sudo chown op:op -R /data/mongodata
+sudo mkdir -pv /backup/csweblog
+sudo mkdir -pv /var/lib/StateServer/logs
+sudo mkdir -pv /var/lib/StateServer/bin
+sudo chown -R StateServer.StateServer  /var/lib/StateServer
+
+
+6、初始化mongo（要先停掉StateServer。配置主从，对于下面的命令：主一下，从一下）
+
+/home/op/mongo
+
+
+主从同时处理
+   执行下面命令时可能会遇到的问题：mongod: /opt/jprofiler8/bin/linux-x64/libstdc++.so.6: version `GLIBCXX_3.4.11' not found (required by mongod)
+   解决方法：由于现有的库版本不支持mongo,需要更新：apt-get upgrade
+keyfile  600 400
+
+首先要修改主机名：/etc/hosts，否则会报错
+	172.16.18.135   banbi-01.sgame.vn  banbi-01
+	172.16.18.136   banbi-02.sgame.vn  banbi-02
+
+(op)-(banbi-02.sgame.vn)-(~/mongo)
+(! 147)-> bash config_mongod.sh  
+MongoDB shell version: 2.2.2
+connecting to: 172.16.18.136:27117/admin
+{
+	"startupStatus" : 3,
+	"info" : "run rs.initiate(...) if not yet done for the set",
+	"errmsg" : "can't get local.system.replset config from self or any seed (EMPTYCONFIG)",
+	"ok" : 0
+}
+
+（1）vim change_IP.sh
+（2）bash change_IP.sh
+（3）bash start_noauth.sh
+（4）bash start_mongos_noauth.sh
+（5）bash config_mongod.sh      #必须出来fps7:27117,fps6:27118,fps7:27119才是正确的，点第2次才出来
+（6）bash config_mongos.sh      #能看到 "OK" : 1 就过，正确
+（7）bash dbauth.sh             #总共会有4个错，主从两边各两个
+（8）bash stop.sh
+（9）bash start.sh
+（10）bash start_mongos.sh
+
+验证主从成功：（两主两从就成）
+	mongo 10.10.54.192:27117/admin -u op -p yuncheng0613db	     shard1:PRIMARY> 
+	mongo 10.10.26.56:27118/admin -u op -p yuncheng0613db        shard1:SECONDARY> 
+
+
+	当磁盘因为mongo切片(shard)满的时候，首先要执行上面2条命令查看下。只有在没办法的时候才在白天清理，看人数不多的情况，一般都是晚上清理，因为要kill一条mongod --shardsvr。等primary切过去的时候，然后删除shard1目录下的所有文件
+	ps -ef | grep shardsvr
+	在做shard切片的时候都要执行一下上面的操作
+	等执行完后，最后观察同步磁盘占用情况，同步过程会一点儿点儿增长的
+	
+
+7、添加开机启动脚本
+
+vim /etc/rc.local
+sudo -u op /home/op/mongo/start.sh || true
+sudo -u op /home/op/mongo/start_mongos.sh || true
+/home/op/bin/fps-stateserver-whitelist.sh || true
+
+8、更新（添加pillar后才可使用）
+ salt 'fps0.uc' state.highstate
+ salt 'fps1.uc' state.highstate
+
+9、防火墙，iptables
+   在各服务器上，cd bin
+   cp whitelist.txt.template whitelist.txt 
+   vim whitelist.txt   添加其内网及外网IP
+   bash fps-stateserver-whitelist.sh
+
+10、更新源并安装mysql（salt上部署）
+   跑源的脚本 apt的salt
+
+   cd /srv/salt/mysql
+   salt 'fps*.uc' state.sls mysql.install
+   salt 'fps23.hy' state.sls mysql.search_mysql
+   
+   /home/op/mysql/bin/mysqladmin -uroot -p password "BHlog2014"
+
+   /home/op/mysql/bin/mysql   -uroot -pBHlog2014
+
+   create database bh_log;
+   grant all on bh_log.* to root@'localhost' identified by 'BHlog2014';
+   GRANT ALL ON bh_log.* to bhgame@'127.0.0.1' Identified by "cygamebh2014";
+   GRANT ALL ON bh_log.* to bhgame@'localhost' Identified by "cygamebh2014";
+   GRANT ALL ON bh_log.* to bhgame@'123.59.56.61' Identified by "cygamebh2014";
+   GRANT ALL ON bh_log.* to bhgame@'10.10.12.223' Identified by "cygamebh2014";
+   GRANT ALL ON bh_log.* to bhgame@'111.200.57.162' Identified by "cygamebh2014";
+   flush privileges;
+
+11、添加fpsdev用户
+
+12、state.lieyan.com.cn/ 监控
+________________________________________________________________________________________________________________________________________________________________________________________________________
+
+准备服务器
+
+
+server_id 是由我们定的，最后给运营
+
+1、前端
+（1）修改 json 文件
+	替换json文件中的后端服务器域名
+（2）修改ApiServer.properties（修改PayServer）
+	cat /home/op/glassfish3/glassfish/domains/PayServer7k7k/config/ApiServer.properties 
+	cat /home/op/glassfish3/glassfish/domains/PayServer4399/config/ApiServer.properties 	
+（3）热更新充值接口PayServer（平台充值接口根据端口控制）
+	vim ~/glassfish3/glassfish/domains/PayServer7k7k/config/domain.xml    --> grep port   http-listener  admin-listener
+	history |grep 8725（7K）      history | grep Init
+	history |grep 8458（4399）
+                      8749（360wan）
+	wget http://127.0.0.1:8725/Apiserver/Init                   wget是http协议，所以 grep 的端口是http-port，而不是admin-listener port
+        如果不成果，就看一下history看有没有别的命令，再不行就重启domain
+
+2、salt
+（1）pillar.item
+	salt 'fps24.gd' pillar.items  -->  查看 platform 和 server_id
+（2）修改 cron
+	salt 'fps24.gd' base_file.crontab.sls 
+	md5sum /home/op/bin/7kData/7kData.py（只有7k的cron里需要加这个7kData.py的任务，4399的没有，只需运行下面的salt即可）
+	cd /home/op/bin/7kData/
+	scp 7kData.py fps24.gd.ppweb.com.cn:/home/op/bin/7kData/
+
+	salt '*.uc' state.sls base_file.crontab
+
+（3）服务器添加到对应的平台组
+	
+	cd /srv/pillar/platform_serverid
+	cp 7k7k_30.sls 7k7k_31.sls
+（4）重启 salt-master
+	vim /srv/salt/top.sls  -->  加入"fps24.gd"
+	/etc/init.d/salt-master restart
+	salt 'fps24.gd' state.highstate
+（5）最后在准备的服务器上重启一下StateServer
+	cat /opt/fps/BattleServer/DarkForest.properties   -->   查看 platform 和 server 是否已经变了
+
+
+3、验证是否安装mysql，
+	salt 'fps24.gd' mysql.install
+	
+
+	/srv/pillar
+  
+	pillar在Salt中已经是默认运行的。minion中的pillars可以通过以下的命令来查看：
+	salt "*" pillar.items
+	默认情况下，master配置文件中的内容是被载入到每个minion的pillar中的。这使得master的配置文件可以作为所有minions的全局配置。
+	pillar默认的路径是：/srv/pillar。
+
+	pillar数据是在Salt master上生成的并被安全地分布到minions上。Salt当定义pillar的时候，不必限制在sls文件，也可以从外部资源获得数据。这对于架构信息存储于其它地方的情况下非常有用。
+
+	使用执行模块pillar。pillar模块有两个funtion：pillar.data和pillar.raw。示例如下：
+		# salt '*' pillar.data
+	在master上修改Pilla文件后，需要用以下命令刷新minion上的数据：
+		salt '*' saltutil.refresh_pillar
+	如果定义好的pillar不生效，建议刷新一下试试。
+
+4、ssh
+	ssh state.lieyan.com.cn/
+
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+服务器删档，清数据
+（1）停服（因为如果不停服，数据还在内存中，还会同步到数据库中的）
+   
+	只需要停StateServer即可，查看停全服脚本，否则荣誉榜清不掉，它是保存在StateServer的内存中的
+
+（2）清空mongo
+   $mongo
+   > show dbs
+   > use admin  （只有use admin后才可以db.auth，要不就一直报错，因为op这个用户属于admin这个库）
+   > db.auth('op','yuncheng0613db')
+   1
+   mongos> show dbs;
+   DB_FPS_BETA_1	7.9501953125GB
+   admin	0.203125GB
+   config	0.046875GB
+   mongos> use DB_FPS_BETA_1  
+   mongos> db.dropDatabase()
+   mongos> use DB_FPS_BETA_1    #清完库后再建库
+   mongos> show dbs
+   DB_FPS_BETA_1	0.203125GB
+   admin	0.203125GB
+   config	0.046875GB
+
+   mongos> db.addUser('op','yuncheng0613db')     #清完库后，记得添加用户                    查看一下所有的用户 ， 查看当前Db的用户名：db.system.users.find();
+  {
+	"user" : "op",
+	"readOnly" : false,
+	"pwd" : "baba53a3681a20e5c5d5bd8b3b549a40",
+	"_id" : ObjectId("54d0839aa697bc6180a7db77")
+   }
+
+   mongos> use DB_FPS_BETA_1
+   switched to db DB_FPS_BETA_1
+   mongos> show collections     #如果有下面那两项，说明创建用户成功了，当新建一个空库的时候，show collections就是空的
+   system.indexes
+   system.users
+
+   mongos> exit
+   bye
+（3）开服
+   删除禁止StateServer启动的那个文件
+
+
+
+
+   config	0.046875GB
+
+mysql备份
+   mysqldump -uroot -pBHlog2014 --lock-tables=false bh_log > bh_log_0408.sql
+
+
+mongo数据库备份  
+   mongodump -h 172.16.4.13 --port 27117 -uop -pyuncheng0613db -o mongodb_dump --oplog
+   tar czf /backup/mongodata/backup/full/20150408.tgz mongodb_dump -C /backup/mongodata/backup
+
+mongo数据库导入
+   sudo -i
+   cd /backup/mongodata/backup/full
+   ll -rt
+   tar xf 201503252303.tgz
+   nohup nice -n -1 mongorestore -h 127.0.0.1 -d DB_FPS_BETA_1 --directoryperdb mongodb_dump/DB_FPS_BETA_1/ -u op -p yuncheng0613db --drop 2>&1 > /tmp/mongorestore_20150325.log &
+   cat /tmp/mongorestore_20150325.log
+
+
+验证主从成功：（两主两从就成）
+	mongo 10.10.54.192:27117/admin -u op -p yuncheng0613db	     shard1:PRIMARY> 
+	mongo 10.10.26.56:27118/admin -u op -p yuncheng0613db        shard1:SECONDARY> 
+
+mongodump.sh
+
+#!/bin/bash
+
+cd /home/op/
+mkdir teams_bak
+mongodump -d DB_FPS_BETA_1 -c teams -o teams_bak -uop -pyuncheng0613db
+mongodump -d DB_FPS_BETA_1 -c team_member -o teams_bak -uop -pyuncheng0613db
+
+
+
+mongorestore.sh
+
+#!/bin/bash
+
+cd /home/op/teams/DB_FPS_BETA_1
+
+mongorestore -d DB_FPS_BETA_1 -c team_member --directoryperdb team_member.bson --drop -uop -pyuncheng0613db
+mongorestore -d DB_FPS_BETA_1 -c teams --directoryperdb teams.bson  --drop -uop -pyuncheng0613db
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
